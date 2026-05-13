@@ -21,10 +21,17 @@ type PaperSummary = {
   innovations?: string[];
   visual_focus?: string;
 };
-type PromptFile = { path?: string; filename?: string; url?: string };
+type PromptFile = { path?: string; filename?: string; url?: string; content?: string };
+type ExportDownload = {
+  url?: string;
+  filename?: string;
+  path?: string;
+  mimeType?: string;
+  base64?: string;
+};
 type ExportInfo = {
-  pptx?: { url?: string; filename?: string; path?: string };
-  zip?: { url?: string; filename?: string; path?: string };
+  pptx?: ExportDownload;
+  zip?: ExportDownload;
 };
 
 const palette = {
@@ -125,6 +132,12 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      releaseExportObjectUrls(pptExports);
+    };
+  }, [pptExports]);
+
   const sectionHint = useMemo(() => {
     if (!configReady) return configMessage || "服务配置未完成";
     if (initialSection === "paperPpt") {
@@ -140,6 +153,49 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
       throw new Error(payload?.error?.message || payload?.message || `请求失败：${response.status}`);
     }
     return payload;
+  }
+
+  function releaseExportObjectUrls(exportsInfo: ExportInfo | null) {
+    const urls = [exportsInfo?.pptx?.url, exportsInfo?.zip?.url];
+    for (const url of urls) {
+      if (typeof url === "string" && url.startsWith("blob:")) {
+        URL.revokeObjectURL(url);
+      }
+    }
+  }
+
+  function base64ToObjectUrl(base64: string, mimeType: string) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+  }
+
+  function hydrateExportDownloads(nextExports: ExportInfo | null) {
+    if (!nextExports) return null;
+
+    const buildDownload = (item?: ExportDownload) => {
+      if (!item) return undefined;
+      if (item.base64 && item.mimeType) {
+        return {
+          ...item,
+          url: base64ToObjectUrl(item.base64, item.mimeType),
+          path: "runtime://download-ready",
+        };
+      }
+      return item;
+    };
+
+    return {
+      pptx: buildDownload(nextExports.pptx),
+      zip: buildDownload(nextExports.zip),
+    } satisfies ExportInfo;
+  }
+
+  function isPersistableAssetUrl(url?: string) {
+    return typeof url === "string" && (/^\//.test(url) || /^https?:/i.test(url));
   }
 
   function getImageSrcFromResponse(response: any) {
@@ -457,7 +513,10 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
 
     setPptStatus("正在读取论文并生成 PPT 资料包...");
     setPptSummary(null);
-    setPptExports(null);
+    setPptExports((current) => {
+      releaseExportObjectUrls(current);
+      return null;
+    });
 
     try {
       const formData = new FormData();
@@ -470,24 +529,28 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
       });
 
       setPptSummary(payload.paperSummary || null);
-      setPptExports(payload.exports || null);
+      const hydratedExports = hydrateExportDownloads(payload.exports || null);
+      setPptExports((current) => {
+        releaseExportObjectUrls(current);
+        return hydratedExports;
+      });
       const assets: CreationAsset[] = [];
-      if (payload.exports?.pptx?.url) {
+      if (hydratedExports?.pptx?.url && isPersistableAssetUrl(hydratedExports.pptx.url)) {
         assets.push({
           type: "file",
-          url: payload.exports.pptx.url,
+          url: hydratedExports.pptx.url,
           label: payload.exports.pptx.filename || "PPTX 文件",
-          filename: payload.exports.pptx.filename || "paper_slides.pptx",
+          filename: hydratedExports.pptx.filename || "paper_slides.pptx",
           mimeType:
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         });
       }
-      if (payload.exports?.zip?.url) {
+      if (hydratedExports?.zip?.url && isPersistableAssetUrl(hydratedExports.zip.url)) {
         assets.push({
           type: "file",
-          url: payload.exports.zip.url,
+          url: hydratedExports.zip.url,
           label: payload.exports.zip.filename || "ZIP 文件",
-          filename: payload.exports.zip.filename || "paper_slides_latex.zip",
+          filename: hydratedExports.zip.filename || "paper_slides_latex.zip",
           mimeType: "application/zip",
         });
       }

@@ -1,16 +1,18 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const ROOT = process.cwd();
-const RUNTIME_NODE_MODULES =
-  "C:/Users/admin/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules";
-const PDFJS_STANDARD_FONT_DIRS = [
-  path.join(ROOT, "node_modules", "pdfjs-dist", "standard_fonts"),
-  path.join(RUNTIME_NODE_MODULES, "pdfjs-dist", "standard_fonts"),
-];
+const require = createRequire(import.meta.url);
+const PDFJS_MODULE_PATH = resolveKnownModulePath("pdfjs-dist/legacy/build/pdf.mjs");
+const PDFJS_PACKAGE_DIR = PDFJS_MODULE_PATH
+  ? path.resolve(path.dirname(PDFJS_MODULE_PATH), "..", "..")
+  : null;
+const PDFJS_STANDARD_FONT_DIRS = PDFJS_PACKAGE_DIR
+  ? [path.join(PDFJS_PACKAGE_DIR, "standard_fonts")]
+  : [];
 
 export async function GET(
   _request: Request,
@@ -52,6 +54,14 @@ function resolveStandardFontPath(filename: string) {
     }
   }
   return null;
+}
+
+function resolveKnownModulePath(moduleSpecifier: string) {
+  try {
+    return require.resolve(moduleSpecifier);
+  } catch {
+    return null;
+  }
 }
 
 function getContentType(filePath: string) {

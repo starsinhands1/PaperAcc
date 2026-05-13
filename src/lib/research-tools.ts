@@ -6,30 +6,28 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
-
-const ROOT = process.cwd();
-const RUNTIME_NODE_MODULES =
-  "C:/Users/admin/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules";
-const PDFJS_CANDIDATE_PATHS = [
-  path.join(ROOT, "node_modules", "pdfjs-dist", "legacy", "build", "pdf.mjs"),
-  path.join(RUNTIME_NODE_MODULES, "pdfjs-dist", "legacy", "build", "pdf.mjs"),
-];
-const PDFJS_STANDARD_FONT_CANDIDATE_PATHS = [
-  path.join(ROOT, "node_modules", "pdfjs-dist", "standard_fonts"),
-  path.join(RUNTIME_NODE_MODULES, "pdfjs-dist", "standard_fonts"),
-];
-const PPTXGEN_CANDIDATE_PATHS = [
-  path.join(ROOT, "node_modules", "pptxgenjs", "dist", "pptxgen.cjs.js"),
-  path.join(RUNTIME_NODE_MODULES, "pptxgenjs", "dist", "pptxgen.cjs.js"),
-  "D:/install/nodejs/node_global/node_modules/pptxgenjs/dist/pptxgen.cjs.js",
-];
-const JSZIP_CANDIDATE_PATHS = [
-  path.join(ROOT, "node_modules", "jszip", "lib", "index.js"),
-  path.join(RUNTIME_NODE_MODULES, "jszip", "lib", "index.js"),
-];
-
-const GENERATED_PROMPTS_DIR = path.join(ROOT, "public", "research-prompts");
-const GENERATED_EXPORTS_DIR = path.join(ROOT, "public", "research-exports");
+const PDFJS_MODULE_PATH = resolveKnownModulePath("pdfjs-dist/legacy/build/pdf.mjs");
+const PDFJS_WORKER_MODULE_PATH = resolveKnownModulePath("pdfjs-dist/legacy/build/pdf.worker.mjs");
+const PDFJS_PACKAGE_DIR = PDFJS_MODULE_PATH
+  ? path.resolve(path.dirname(PDFJS_MODULE_PATH), "..", "..")
+  : null;
+const PPTXGEN_MODULE_PATH = resolveKnownModulePath("pptxgenjs");
+const JSZIP_MODULE_PATH = resolveKnownModulePath("jszip");
+const PDFJS_CANDIDATE_PATHS = PDFJS_MODULE_PATH
+  ? [PDFJS_MODULE_PATH]
+  : [];
+const PDFJS_STANDARD_FONT_CANDIDATE_PATHS = PDFJS_PACKAGE_DIR
+  ? [path.join(PDFJS_PACKAGE_DIR, "standard_fonts")]
+  : [];
+const PPTXGEN_CANDIDATE_PATHS = PPTXGEN_MODULE_PATH
+  ? [
+      PPTXGEN_MODULE_PATH,
+      path.join(path.dirname(PPTXGEN_MODULE_PATH), "pptxgen.js"),
+    ]
+  : [];
+const JSZIP_CANDIDATE_PATHS = JSZIP_MODULE_PATH
+  ? [JSZIP_MODULE_PATH]
+  : [];
 let pdfjsModulePromise: Promise<PdfJsModule> | null = null;
 let pdfjsStandardFontUrl: string | null = null;
 
@@ -64,18 +62,21 @@ type StoredFile = {
 
 type ExportInfo = {
   pptx: {
-    path: string;
     filename: string;
-    url: string;
+    mimeType: string;
+    base64: string;
   };
   zip: {
-    path: string;
     filename: string;
-    url: string;
+    mimeType: string;
+    base64: string;
   };
 };
 
 type PdfJsModule = {
+  GlobalWorkerOptions?: {
+    workerSrc?: string;
+  };
   getDocument: (options: {
     data: Uint8Array;
     useWorkerFetch: boolean;
@@ -518,7 +519,7 @@ async function extractPdfText(buffer: Buffer) {
 
   return withSuppressedPdfJsWarnings(async () => {
     const pdf = await loadingTask.promise;
-    const pageLimit = Math.min(pdf.numPages, 40);
+    const pageLimit = Math.min(pdf.numPages, 20);
     let text = "";
 
     for (let index = 1; index <= pageLimit; index += 1) {
@@ -533,7 +534,7 @@ async function extractPdfText(buffer: Buffer) {
       if (pageText) {
         text += `\n\n[Page ${index}]\n${pageText}`;
       }
-      if (text.length > 120000) {
+      if (text.length > 40000 && index >= 8) {
         break;
       }
     }
@@ -545,9 +546,65 @@ async function extractPdfText(buffer: Buffer) {
 
 async function loadPdfJs() {
   if (!pdfjsModulePromise) {
-    pdfjsModulePromise = importPdfJsModule();
+    pdfjsModulePromise = importPdfJsModuleForRuntime();
   }
   return pdfjsModulePromise;
+}
+
+async function importPdfJsModuleForRuntime(): Promise<PdfJsModule> {
+  try {
+    const pdfjs = (await import("pdfjs-dist/legacy/build/pdf.mjs")) as PdfJsModule;
+    const pdfjsWorker = (await import("pdfjs-dist/legacy/build/pdf.worker.mjs")) as {
+      WorkerMessageHandler?: unknown;
+    };
+
+    if (pdfjsWorker.WorkerMessageHandler) {
+      (
+        globalThis as typeof globalThis & {
+          pdfjsWorker?: { WorkerMessageHandler?: unknown };
+        }
+      ).pdfjsWorker = {
+        WorkerMessageHandler: pdfjsWorker.WorkerMessageHandler,
+      };
+    }
+
+    if (PDFJS_WORKER_MODULE_PATH && pdfjs.GlobalWorkerOptions) {
+      pdfjs.GlobalWorkerOptions.workerSrc = pathToFileURL(PDFJS_WORKER_MODULE_PATH).href;
+    }
+
+    if (!pdfjsStandardFontUrl) {
+      const standardFontPath = PDFJS_STANDARD_FONT_CANDIDATE_PATHS.find((candidatePath) =>
+        fs.existsSync(candidatePath),
+      );
+      if (standardFontPath) {
+        pdfjsStandardFontUrl = ensureDirectoryUrl(standardFontPath);
+      }
+    }
+
+    return pdfjs;
+  } catch (error) {
+    const details: string[] = [];
+
+    if (PDFJS_MODULE_PATH) {
+      details.push(`resolved: ${PDFJS_MODULE_PATH}`);
+      details.push(`exists: ${fs.existsSync(PDFJS_MODULE_PATH)}`);
+    } else {
+      details.push("resolved: <none>");
+    }
+
+    if (PDFJS_WORKER_MODULE_PATH) {
+      details.push(`workerResolved: ${PDFJS_WORKER_MODULE_PATH}`);
+      details.push(`workerExists: ${fs.existsSync(PDFJS_WORKER_MODULE_PATH)}`);
+    } else {
+      details.push("workerResolved: <none>");
+    }
+
+    const message =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `PDF 瑙ｆ瀽妯″潡鍔犺浇澶辫触銆?${message}${details.length ? ` | ${details.join(" | ")}` : ""}`,
+    );
+  }
 }
 
 async function importPdfJsModule(): Promise<PdfJsModule> {
@@ -906,12 +963,9 @@ function saveGeneratedPrompt(input: {
   userDescription: string;
   prompt: string;
 }) {
-  fs.mkdirSync(GENERATED_PROMPTS_DIR, { recursive: true });
-
   const safeTitle = sanitizeFilename((input.summary.title || "paper").slice(0, 50));
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const filename = `${timestamp}_${input.figureType}_${safeTitle}.txt`;
-  const filePath = path.join(GENERATED_PROMPTS_DIR, filename);
   const content = [
     `title: ${input.summary.title || ""}`,
     `figure_type: ${input.figureType}`,
@@ -931,11 +985,10 @@ function saveGeneratedPrompt(input: {
     input.prompt,
   ].join("\n");
 
-  fs.writeFileSync(filePath, content, "utf8");
   return {
-    path: filePath,
+    path: "runtime://generated-prompt",
     filename,
-    url: `/research-prompts/${filename}`,
+    content,
   };
 }
 
@@ -944,8 +997,6 @@ async function generatePaperPptExports(input: {
   summary: PaperSummary;
   userDescription: string;
 }): Promise<ExportInfo> {
-  fs.mkdirSync(GENERATED_EXPORTS_DIR, { recursive: true });
-
   const baseName =
     sanitizeFilename(
       path.basename(
@@ -957,36 +1008,32 @@ async function generatePaperPptExports(input: {
   const stem = `${timestamp}_${baseName}`;
   const pptxFilename = `${stem}.pptx`;
   const zipFilename = `${stem}_latex.zip`;
-  const pptxPath = path.join(GENERATED_EXPORTS_DIR, pptxFilename);
-  const zipPath = path.join(GENERATED_EXPORTS_DIR, zipFilename);
 
-  await writePptxDeck({
-    outputPath: pptxPath,
+  const pptxBuffer = await writePptxDeck({
     summary: input.summary,
     userDescription: input.userDescription,
   });
-  await writeLatexZip({
-    outputPath: zipPath,
+  const zipBuffer = await writeLatexZip({
     summary: input.summary,
     userDescription: input.userDescription,
   });
 
   return {
     pptx: {
-      path: pptxPath,
       filename: pptxFilename,
-      url: `/research-exports/${pptxFilename}`,
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      base64: pptxBuffer.toString("base64"),
     },
     zip: {
-      path: zipPath,
       filename: zipFilename,
-      url: `/research-exports/${zipFilename}`,
+      mimeType: "application/zip",
+      base64: zipBuffer.toString("base64"),
     },
   };
 }
 
 async function writePptxDeck(input: {
-  outputPath: string;
   summary: PaperSummary;
   userDescription: string;
 }) {
@@ -1049,7 +1096,8 @@ async function writePptxDeck(input: {
     "这一页建议用于总结价值、亮点和可扩展方向。",
   );
 
-  await pptx.writeFile({ fileName: input.outputPath });
+  const output = await pptx.write({ outputType: "nodebuffer" });
+  return Buffer.isBuffer(output) ? output : Buffer.from(output);
 }
 
 function addTitleSlide(pptx: any, summary: PaperSummary, userDescription: string) {
@@ -1226,7 +1274,6 @@ function addBulletSlide(
 }
 
 async function writeLatexZip(input: {
-  outputPath: string;
   summary: PaperSummary;
   userDescription: string;
 }) {
@@ -1276,7 +1323,7 @@ async function writeLatexZip(input: {
     type: "nodebuffer",
     compression: "DEFLATE",
   });
-  fs.writeFileSync(input.outputPath, content);
+  return Buffer.isBuffer(content) ? content : Buffer.from(content);
 }
 
 function buildMainTex(summary: PaperSummary) {
@@ -1364,6 +1411,14 @@ function sanitizeFilename(name: string) {
   return path.basename(String(name || "file")).replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_");
 }
 
+function resolveKnownModulePath(moduleSpecifier: string) {
+  try {
+    return require.resolve(moduleSpecifier);
+  } catch {
+    return null;
+  }
+}
+
 function loadPptxGen(): any {
   return requireFromCandidatePaths<any>("pptxgenjs", PPTXGEN_CANDIDATE_PATHS);
 }
@@ -1379,6 +1434,13 @@ function requireFromCandidatePaths<T>(moduleName: string, candidatePaths: string
     "return req(modulePath);",
   ) as (req: NodeRequire, modulePath: string) => T;
   const errors: string[] = [];
+
+  try {
+    return runtimeRequire(require, moduleName);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    errors.push(`${moduleName} -> ${message}`);
+  }
 
   for (const candidatePath of candidatePaths) {
     if (!fs.existsSync(candidatePath)) {

@@ -177,7 +177,7 @@ export function HeroSection({ onStartCreating, onViewExamples }: HeroSectionProp
                 borderRadius: 100,
               }}
             >
-              v1.0 全新上线
+              v2.0 全新上线
             </span>
             <span>专为科研人发表论文深度定制</span>
           </div>
