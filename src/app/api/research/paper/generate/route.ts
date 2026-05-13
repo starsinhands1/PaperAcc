@@ -20,7 +20,7 @@ export async function POST(request: Request) {
       figureType: String(formData.get("figureType") || "framework"),
       userDescription: String(formData.get("userDescription") || ""),
       size: String(formData.get("size") || "1536x1024"),
-      quality: String(formData.get("quality") || "high"),
+      quality: String(formData.get("quality") || "medium"),
       count: Number(formData.get("count") || 1),
       appBaseUrl: new URL(request.url).origin,
     });

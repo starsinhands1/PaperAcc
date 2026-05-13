@@ -80,7 +80,7 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
   const [mode, setMode] = useState<"text" | "image">("text");
   const [generalPrompt, setGeneralPrompt] = useState("");
   const [generalSize, setGeneralSize] = useState("1024x1024");
-  const [generalQuality, setGeneralQuality] = useState("high");
+  const [generalQuality, setGeneralQuality] = useState("medium");
   const [generalCount, setGeneralCount] = useState("1");
   const [generalFile, setGeneralFile] = useState<File | null>(null);
   const [generalStatus, setGeneralStatus] = useState("");
@@ -90,7 +90,7 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
   const [paperFigureType, setPaperFigureType] = useState<"framework" | "roadmap">("framework");
   const [paperPrompt, setPaperPrompt] = useState("");
   const [paperSize, setPaperSize] = useState("1536x1024");
-  const [paperQuality, setPaperQuality] = useState("high");
+  const [paperQuality, setPaperQuality] = useState("medium");
   const [paperCount, setPaperCount] = useState("1");
   const [paperStatus, setPaperStatus] = useState("");
   const [paperResults, setPaperResults] = useState<ResultItem[]>([]);

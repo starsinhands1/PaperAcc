@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -35,6 +36,10 @@ const NAPI_RS_CANVAS_CANDIDATE_PATHS = NAPI_RS_CANVAS_MODULE_PATH
 let pdfjsModulePromise: Promise<PdfJsModule> | null = null;
 let pdfjsNodePolyfillsPromise: Promise<void> | null = null;
 let pdfjsStandardFontUrl: string | null = null;
+const MAX_PAPER_TEXT_CACHE_ENTRIES = 24;
+const MAX_PAPER_SUMMARY_CACHE_ENTRIES = 48;
+const paperTextCache = new Map<string, string>();
+const paperSummaryCache = new Map<string, PaperSummary>();
 
 const APP_CONFIG = {
   baseUrl: normalizeBaseUrl(
@@ -113,6 +118,7 @@ export function getResearchConfig() {
 
 export async function proxyImageGeneration(payload: unknown) {
   ensureConfigReady();
+  const normalizedPayload = normalizeGenerationPayload(payload);
   return parseUpstreamJsonOrThrow(
     await requestUpstream("/v1/images/generations", {
       method: "POST",
@@ -120,7 +126,7 @@ export async function proxyImageGeneration(payload: unknown) {
         "Content-Type": "application/json",
         Accept: "application/json",
       },
-      body: Buffer.from(JSON.stringify(payload ?? {})),
+      body: Buffer.from(JSON.stringify(normalizedPayload)),
     }),
     "/v1/images/generations",
   );
@@ -166,6 +172,7 @@ export async function generatePaperImages(input: {
   configurePdfJsStandardFontUrl(input.appBaseUrl);
 
   const paperFile = await toStoredFile(input.paperFile);
+  const paperFileHash = createContentHash(paperFile.content);
   const paperText = await extractPaperText(paperFile);
   if (!paperText.trim()) {
     throw new Error("未能从论文中提取可用文本，请上传 PDF、TXT 或 MD 文件。");
@@ -175,6 +182,7 @@ export async function generatePaperImages(input: {
     paperText,
     userDescription: input.userDescription,
     figureType: input.figureType,
+    cacheKey: `${paperFileHash}:image:${input.figureType}:${normalizeCacheSegment(input.userDescription)}`,
   });
 
   const imagePrompt = buildPaperImagePrompt({
@@ -203,7 +211,7 @@ export async function generatePaperImages(input: {
           prompt: imagePrompt,
           n: clampInteger(input.count, 1, 6, 1),
           size: input.size || "1536x1024",
-          quality: input.quality || "high",
+          quality: input.quality || "medium",
         }),
       ),
     }),
@@ -225,6 +233,7 @@ export async function generatePaperPptPackage(input: {
 }) {
   configurePdfJsStandardFontUrl(input.appBaseUrl);
   const paperFile = await toStoredFile(input.paperFile);
+  const paperFileHash = createContentHash(paperFile.content);
   const paperText = await extractPaperText(paperFile);
   if (!paperText.trim()) {
     throw new Error("未能从论文中提取可用文本，请上传 PDF、TXT 或 MD 文件。");
@@ -234,6 +243,7 @@ export async function generatePaperPptPackage(input: {
     paperText,
     userDescription: input.userDescription,
     figureType: "roadmap",
+    cacheKey: `${paperFileHash}:ppt:roadmap:${normalizeCacheSegment(input.userDescription)}`,
   });
 
   const exports = await generatePaperPptExports({
@@ -282,13 +292,32 @@ async function analyzePaper(input: {
   paperText: string;
   userDescription: string;
   figureType: string;
+  cacheKey?: string;
 }) {
+  if (input.cacheKey) {
+    const cached = getCachedMapValue(paperSummaryCache, input.cacheKey);
+    if (cached) {
+      return cached;
+    }
+  }
+
   const excerpt = normalizePaperText(input.paperText).slice(0, 24000);
-  return buildLocalPaperSummary(
+  const summary = buildLocalPaperSummary(
     excerpt,
     input.figureType,
     input.userDescription,
   );
+
+  if (input.cacheKey) {
+    setCachedMapValue(
+      paperSummaryCache,
+      input.cacheKey,
+      summary,
+      MAX_PAPER_SUMMARY_CACHE_ENTRIES,
+    );
+  }
+
+  return summary;
 }
 
 function buildPaperImagePrompt(input: {
@@ -504,7 +533,22 @@ async function extractPaperText(file: StoredFile) {
     return file.content.toString("utf8").replace(/\r\n/g, "\n");
   }
   if (ext === ".pdf") {
-    return extractPdfText(file.content);
+    const cacheKey = createContentHash(file.content);
+    const cached = getCachedMapValue(paperTextCache, cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const text = await extractPdfText(file.content);
+    if (text.trim()) {
+      setCachedMapValue(
+        paperTextCache,
+        cacheKey,
+        text,
+        MAX_PAPER_TEXT_CACHE_ENTRIES,
+      );
+    }
+    return text;
   }
   throw new Error("目前仅支持上传 PDF、TXT 或 MD 文件。");
 }
@@ -559,14 +603,14 @@ async function loadPdfJs() {
 async function ensurePdfJsNodePolyfills() {
   if (!pdfjsNodePolyfillsPromise) {
     pdfjsNodePolyfillsPromise = (async () => {
-      const canvas = requireFromCandidatePaths<{
+      const canvas = loadNapiRsCanvas<{
         DOMMatrix?: unknown;
         DOMPoint?: unknown;
         DOMRect?: unknown;
         ImageData?: unknown;
         Path2D?: unknown;
         Image?: unknown;
-      }>("@napi-rs/canvas", NAPI_RS_CANVAS_CANDIDATE_PATHS);
+      }>();
       const globals = globalThis as Record<string, unknown>;
 
       globals.DOMMatrix ??= canvas.DOMMatrix;
@@ -1439,8 +1483,62 @@ function normalizeBaseUrl(value: string) {
   }
 }
 
+function normalizeGenerationPayload(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {
+      quality: "medium",
+      size: "1024x1024",
+    };
+  }
+
+  const normalized = { ...(payload as Record<string, unknown>) };
+  if (!String(normalized.quality || "").trim()) {
+    normalized.quality = "medium";
+  }
+  if (!String(normalized.size || "").trim()) {
+    normalized.size = "1024x1024";
+  }
+  normalized.n = clampInteger(normalized.n, 1, 6, 1);
+  return normalized;
+}
+
 function sanitizeFilename(name: string) {
   return path.basename(String(name || "file")).replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_");
+}
+
+function createContentHash(content: Buffer) {
+  return createHash("sha1").update(content).digest("hex");
+}
+
+function normalizeCacheSegment(value: string) {
+  return createHash("sha1")
+    .update(String(value || "").trim().slice(0, 2000))
+    .digest("hex");
+}
+
+function getCachedMapValue<T>(cache: Map<string, T>, key: string) {
+  const value = cache.get(key);
+  if (value === undefined) {
+    return null;
+  }
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+function setCachedMapValue<T>(cache: Map<string, T>, key: string, value: T, limit: number) {
+  if (cache.has(key)) {
+    cache.delete(key);
+  }
+  cache.set(key, value);
+
+  while (cache.size > limit) {
+    const oldestKey = cache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    cache.delete(oldestKey);
+  }
 }
 
 function resolveKnownModulePath(moduleSpecifier: string) {
@@ -1452,23 +1550,34 @@ function resolveKnownModulePath(moduleSpecifier: string) {
 }
 
 function loadPptxGen(): any {
-  return requireFromCandidatePaths<any>("pptxgenjs", PPTXGEN_CANDIDATE_PATHS);
+  try {
+    return require("pptxgenjs");
+  } catch {
+    return requireFromCandidatePaths<any>("pptxgenjs", PPTXGEN_CANDIDATE_PATHS);
+  }
 }
 
 function loadJsZip(): any {
-  return requireFromCandidatePaths<any>("jszip", JSZIP_CANDIDATE_PATHS);
+  try {
+    return require("jszip");
+  } catch {
+    return requireFromCandidatePaths<any>("jszip", JSZIP_CANDIDATE_PATHS);
+  }
+}
+
+function loadNapiRsCanvas<T>(): T {
+  try {
+    return require("@napi-rs/canvas") as T;
+  } catch {
+    return requireFromCandidatePaths<T>("@napi-rs/canvas", NAPI_RS_CANVAS_CANDIDATE_PATHS);
+  }
 }
 
 function requireFromCandidatePaths<T>(moduleName: string, candidatePaths: string[]): T {
-  const runtimeRequire = new Function(
-    "req",
-    "modulePath",
-    "return req(modulePath);",
-  ) as (req: NodeRequire, modulePath: string) => T;
   const errors: string[] = [];
 
   try {
-    return runtimeRequire(require, moduleName);
+    return require(moduleName) as T;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     errors.push(`${moduleName} -> ${message}`);
@@ -1481,7 +1590,7 @@ function requireFromCandidatePaths<T>(moduleName: string, candidatePaths: string
     }
 
     try {
-      return runtimeRequire(require, candidatePath);
+      return require(candidatePath) as T;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : String(error);
