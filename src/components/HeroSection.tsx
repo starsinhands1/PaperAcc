@@ -212,7 +212,7 @@ export function HeroSection({ onStartCreating, onViewExamples }: HeroSectionProp
               margin: "0 0 22px",
             }}
           >
-            被创造出来
+            被创造出来2
           </h1>
 
           {/* Subtitle */}
