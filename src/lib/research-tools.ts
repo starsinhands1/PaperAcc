@@ -11,6 +11,7 @@ const PDFJS_WORKER_MODULE_PATH = resolveKnownModulePath("pdfjs-dist/legacy/build
 const PDFJS_PACKAGE_DIR = PDFJS_MODULE_PATH
   ? path.resolve(path.dirname(PDFJS_MODULE_PATH), "..", "..")
   : null;
+const NAPI_RS_CANVAS_MODULE_PATH = resolveKnownModulePath("@napi-rs/canvas");
 const PPTXGEN_MODULE_PATH = resolveKnownModulePath("pptxgenjs");
 const JSZIP_MODULE_PATH = resolveKnownModulePath("jszip");
 const PDFJS_CANDIDATE_PATHS = PDFJS_MODULE_PATH
@@ -28,7 +29,11 @@ const PPTXGEN_CANDIDATE_PATHS = PPTXGEN_MODULE_PATH
 const JSZIP_CANDIDATE_PATHS = JSZIP_MODULE_PATH
   ? [JSZIP_MODULE_PATH]
   : [];
+const NAPI_RS_CANVAS_CANDIDATE_PATHS = NAPI_RS_CANVAS_MODULE_PATH
+  ? [NAPI_RS_CANVAS_MODULE_PATH]
+  : [];
 let pdfjsModulePromise: Promise<PdfJsModule> | null = null;
+let pdfjsNodePolyfillsPromise: Promise<void> | null = null;
 let pdfjsStandardFontUrl: string | null = null;
 
 const APP_CONFIG = {
@@ -551,8 +556,35 @@ async function loadPdfJs() {
   return pdfjsModulePromise;
 }
 
+async function ensurePdfJsNodePolyfills() {
+  if (!pdfjsNodePolyfillsPromise) {
+    pdfjsNodePolyfillsPromise = (async () => {
+      const canvas = requireFromCandidatePaths<{
+        DOMMatrix?: unknown;
+        DOMPoint?: unknown;
+        DOMRect?: unknown;
+        ImageData?: unknown;
+        Path2D?: unknown;
+        Image?: unknown;
+      }>("@napi-rs/canvas", NAPI_RS_CANVAS_CANDIDATE_PATHS);
+      const globals = globalThis as Record<string, unknown>;
+
+      globals.DOMMatrix ??= canvas.DOMMatrix;
+      globals.DOMPoint ??= canvas.DOMPoint;
+      globals.DOMRect ??= canvas.DOMRect;
+      globals.ImageData ??= canvas.ImageData;
+      globals.Path2D ??= canvas.Path2D;
+      globals.Image ??= canvas.Image;
+    })();
+  }
+
+  return pdfjsNodePolyfillsPromise;
+}
+
 async function importPdfJsModuleForRuntime(): Promise<PdfJsModule> {
   try {
+    await ensurePdfJsNodePolyfills();
+
     const pdfjs = (await import("pdfjs-dist/legacy/build/pdf.mjs")) as PdfJsModule;
     const pdfjsWorker = (await import("pdfjs-dist/legacy/build/pdf.worker.mjs")) as {
       WorkerMessageHandler?: unknown;
