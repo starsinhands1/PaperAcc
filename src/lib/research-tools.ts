@@ -38,18 +38,29 @@ let pdfjsNodePolyfillsPromise: Promise<void> | null = null;
 let pdfjsStandardFontUrl: string | null = null;
 const MAX_PAPER_TEXT_CACHE_ENTRIES = 24;
 const MAX_PAPER_SUMMARY_CACHE_ENTRIES = 48;
+const MAX_TRANSLATION_CACHE_ENTRIES = 24;
 const paperTextCache = new Map<string, string>();
 const paperSummaryCache = new Map<string, PaperSummary>();
+const paperTranslationCache = new Map<string, TranslationResult>();
 
 const APP_CONFIG = {
   baseUrl: normalizeBaseUrl(
     process.env.IMAGE_BASE_URL || "https://www.packyapi.com",
   ),
-  apiKey: String(
+  imageApiKey: String(
     process.env.IMAGE_API_KEY ||
       "sk-KmCtmAdbrUe5DXD6k5TNH8miS5UTtDzcb1DGNGvWWrya2GMn",
   ).trim(),
+  textApiKey: String(
+    process.env.TEXT_API_KEY ||
+      "sk-MRopeGyHQ1JEzbammNFsmgrDJbcKAgoTQZBtRJwqO83YjfAL",
+  ).trim(),
   imageModel: String(process.env.IMAGE_MODEL || "gpt-image-2").trim(),
+  textModel: String(
+    process.env.TEXT_MODEL ||
+      process.env.CHAT_MODEL ||
+      "gpt-4.1",
+  ).trim(),
 };
 
 type PaperSummary = {
@@ -81,6 +92,35 @@ type ExportInfo = {
     mimeType: string;
     base64: string;
   };
+};
+
+type TranslationDirection = "zh-en" | "en-zh";
+
+type IdeaChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+type TranslationExportInfo = {
+  docx: {
+    filename: string;
+    mimeType: string;
+    base64: string;
+  };
+  zip: {
+    filename: string;
+    mimeType: string;
+    base64: string;
+  };
+};
+
+type TranslationResult = {
+  title: string;
+  sourceLanguage: "zh-CN" | "en";
+  targetLanguage: "zh-CN" | "en";
+  translatedText: string;
+  paragraphCount: number;
+  exports: TranslationExportInfo;
 };
 
 type PdfJsModule = {
@@ -258,6 +298,112 @@ export async function generatePaperPptPackage(input: {
   };
 }
 
+export async function translatePaperDocument(input: {
+  paperFile: File;
+  direction: TranslationDirection;
+  appBaseUrl?: string;
+}) {
+  ensureConfigReady();
+  configurePdfJsStandardFontUrl(input.appBaseUrl);
+
+  const paperFile = await toStoredFile(input.paperFile);
+  const paperFileHash = createContentHash(paperFile.content);
+  const translationCacheKey = `${paperFileHash}:${input.direction}`;
+  const cached = getCachedMapValue(paperTranslationCache, translationCacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const paperText = await extractPaperText(paperFile);
+  const cleanedText = sanitizePaperTextForTranslation(paperText);
+  if (!cleanedText.trim()) {
+    throw new Error("论文内容为空，暂时无法翻译。");
+  }
+
+  const translatedText = await translateAcademicPaperText({
+    text: cleanedText,
+    direction: input.direction,
+  });
+  const title = inferTranslatedTitle(
+    translatedText,
+    paperFile.filename,
+    input.direction,
+  );
+  const exports = await buildTranslationExports({
+    title,
+    translatedText,
+    direction: input.direction,
+  });
+
+  const result: TranslationResult = {
+    title,
+    sourceLanguage: input.direction === "zh-en" ? "zh-CN" : "en",
+    targetLanguage: input.direction === "zh-en" ? "en" : "zh-CN",
+    translatedText,
+    paragraphCount: translatedText
+      .split(/\n{2,}/)
+      .map((item) => item.trim())
+      .filter(Boolean).length,
+    exports,
+  };
+
+  setCachedMapValue(
+    paperTranslationCache,
+    translationCacheKey,
+    result,
+    MAX_TRANSLATION_CACHE_ENTRIES,
+  );
+
+  return result;
+}
+
+export async function chatIdeaAssistant(input: {
+  messages: IdeaChatMessage[];
+}) {
+  ensureTextConfigReady();
+
+  const messages = normalizeIdeaChatMessages(input.messages);
+  if (!messages.length) {
+    throw new Error("Please enter a message before sending.");
+  }
+
+  const payload = await requestUpstreamJson("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    apiKey: APP_CONFIG.textApiKey,
+    body: Buffer.from(
+      JSON.stringify({
+        model: APP_CONFIG.textModel,
+        temperature: 0.7,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are Paper Acc's inspiration copilot. You help with research inspiration, product ideation, paper topics, writing angles, creative planning, naming, and structured brainstorming. " +
+              "Be practical, clear, encouraging, and concise. When helpful, offer options, frameworks, examples, and next steps. If the user writes in Chinese, answer in Chinese.",
+          },
+          ...messages,
+        ],
+      }),
+    ),
+  });
+
+  const reply =
+    extractChatMessageText(payload) ||
+    extractResponseOutputText(payload);
+  if (!reply.trim()) {
+    throw new Error("The idea assistant returned an empty response.");
+  }
+
+  return {
+    reply: reply.trim(),
+    model: APP_CONFIG.textModel,
+  };
+}
+
 async function toStoredFile(file: File): Promise<StoredFile> {
   return {
     filename: sanitizeFilename(file.name || "paper"),
@@ -265,8 +411,402 @@ async function toStoredFile(file: File): Promise<StoredFile> {
   };
 }
 
+function sanitizePaperTextForTranslation(text: string) {
+  return normalizePaperText(text)
+    .replace(/\n{2,}\[Page \d+\]\n/gi, "\n\n")
+    .replace(/\[Page \d+\]\s*/gi, "")
+    .trim();
+}
+
+async function translateAcademicPaperText(input: {
+  text: string;
+  direction: TranslationDirection;
+}) {
+  const chunks = splitTranslationText(input.text, 3600);
+  const translatedChunks = await mapWithConcurrency(
+    chunks,
+    2,
+    async (chunk, index) =>
+      translateTextChunk({
+        text: chunk,
+        direction: input.direction,
+        index,
+        total: chunks.length,
+      }),
+  );
+
+  return translatedChunks
+    .map((item) => normalizeTranslatedText(item))
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+async function translateTextChunk(input: {
+  text: string;
+  direction: TranslationDirection;
+  index: number;
+  total: number;
+}) {
+  const sourceLanguage =
+    input.direction === "zh-en" ? "Chinese" : "English";
+  const targetLanguage =
+    input.direction === "zh-en" ? "English" : "Chinese";
+  const payload = await requestUpstreamJson("/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    apiKey: APP_CONFIG.textApiKey,
+    body: Buffer.from(
+      JSON.stringify({
+        model: APP_CONFIG.textModel,
+        temperature: 0.1,
+        messages: [
+          {
+            role: "system",
+            content:
+              `You are an expert academic translator. Translate ${sourceLanguage} academic papers into ${targetLanguage}. ` +
+              "Preserve all information, maintain paragraph structure, keep terminology accurate, and do not add commentary.",
+          },
+          {
+            role: "user",
+            content:
+              `Translate part ${input.index + 1} of ${input.total}. ` +
+              "Output only the translated text. Preserve headings, lists, formulas, citations, and paragraph breaks as much as possible.\n\n" +
+              input.text,
+          },
+        ],
+      }),
+    ),
+  });
+
+  const translated =
+    extractChatMessageText(payload) ||
+    extractResponseOutputText(payload);
+  if (!translated.trim()) {
+    throw new Error("翻译接口返回了空内容。");
+  }
+  return translated;
+}
+
+function splitTranslationText(text: string, maxChars: number) {
+  const paragraphs = normalizePaperText(text)
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (!paragraphs.length) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const paragraph of paragraphs) {
+    if (!current) {
+      current = paragraph;
+      continue;
+    }
+
+    const next = `${current}\n\n${paragraph}`;
+    if (next.length <= maxChars) {
+      current = next;
+      continue;
+    }
+
+    chunks.push(current);
+    current = paragraph;
+  }
+
+  if (current) {
+    chunks.push(current);
+  }
+
+  return chunks.length ? chunks : [text];
+}
+
+function normalizeTranslatedText(text: string) {
+  return String(text || "")
+    .replace(/^```[a-zA-Z0-9_-]*\s*/g, "")
+    .replace(/\s*```$/g, "")
+    .replace(/\r/g, "")
+    .trim();
+}
+
+async function buildTranslationExports(input: {
+  title: string;
+  translatedText: string;
+  direction: TranslationDirection;
+}): Promise<TranslationExportInfo> {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeTitle = sanitizeFilename(input.title || "translated_paper");
+  const suffix = input.direction === "zh-en" ? "zh_to_en" : "en_to_zh";
+  const stem = `${timestamp}_${safeTitle}_${suffix}`;
+  const docxBuffer = await buildDocxDocument(input.title, input.translatedText);
+  const zipBuffer = await buildOverleafZip(input.title, input.translatedText, input.direction);
+
+  return {
+    docx: {
+      filename: `${stem}.docx`,
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      base64: docxBuffer.toString("base64"),
+    },
+    zip: {
+      filename: `${stem}_overleaf.zip`,
+      mimeType: "application/zip",
+      base64: zipBuffer.toString("base64"),
+    },
+  };
+}
+
+async function buildDocxDocument(title: string, translatedText: string) {
+  const JSZip = loadJsZip();
+  const zip = new JSZip();
+  const paragraphs = buildWordParagraphXml(title, translatedText);
+
+  zip.file(
+    "[Content_Types].xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>`,
+  );
+  zip.folder("_rels")?.file(
+    ".rels",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`,
+  );
+  zip.folder("docProps")?.file(
+    "app.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Paper Acc</Application>
+</Properties>`,
+  );
+  zip.folder("docProps")?.file(
+    "core.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>${escapeXml(title)}</dc:title>
+  <dc:creator>Paper Acc</dc:creator>
+</cp:coreProperties>`,
+  );
+  zip.folder("word")?.file(
+    "styles.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:name w:val="Normal"/>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="Title">
+    <w:name w:val="Title"/>
+    <w:rPr>
+      <w:b/>
+      <w:sz w:val="32"/>
+    </w:rPr>
+  </w:style>
+</w:styles>`,
+  );
+  zip.folder("word")?.folder("_rels")?.file(
+    "document.xml.rels",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`,
+  );
+  zip.folder("word")?.file(
+    "document.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    ${paragraphs}
+    <w:sectPr>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>`,
+  );
+
+  const output = await zip.generateAsync({
+    type: "nodebuffer",
+    compression: "DEFLATE",
+  });
+  return Buffer.isBuffer(output) ? output : Buffer.from(output);
+}
+
+function buildWordParagraphXml(title: string, translatedText: string) {
+  const bodyParagraphs = translatedText
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map(
+      (paragraph) =>
+        `<w:p><w:r><w:t xml:space="preserve">${escapeXml(paragraph)}</w:t></w:r></w:p>`,
+    );
+
+  return [
+    `<w:p><w:pPr><w:pStyle w:val="Title"/></w:pPr><w:r><w:t xml:space="preserve">${escapeXml(title)}</w:t></w:r></w:p>`,
+    ...bodyParagraphs,
+  ].join("");
+}
+
+async function buildOverleafZip(
+  title: string,
+  translatedText: string,
+  direction: TranslationDirection,
+) {
+  const JSZip = loadJsZip();
+  const zip = new JSZip();
+  const useChinese = direction === "en-zh";
+  zip.file("README.txt", buildOverleafReadme(direction));
+  zip.file("main.tex", buildTranslationLatex(title, translatedText, useChinese));
+
+  const output = await zip.generateAsync({
+    type: "nodebuffer",
+    compression: "DEFLATE",
+  });
+  return Buffer.isBuffer(output) ? output : Buffer.from(output);
+}
+
+function buildTranslationLatex(title: string, translatedText: string, useChinese: boolean) {
+  const documentClass = useChinese ? "\\documentclass[UTF8]{ctexart}" : "\\documentclass{article}";
+  const body = translatedText
+    .split(/\n{2,}/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => `${escapeLatex(item)}\n`)
+    .join("\n");
+
+  return [
+    documentClass,
+    "\\usepackage[margin=1in]{geometry}",
+    "\\usepackage{setspace}",
+    "\\usepackage{hyperref}",
+    "\\setstretch{1.2}",
+    `\\title{${escapeLatex(title)}}`,
+    "\\author{Paper Acc Translation Export}",
+    "\\date{\\today}",
+    "",
+    "\\begin{document}",
+    "\\maketitle",
+    "",
+    body,
+    "",
+    "\\end{document}",
+    "",
+  ].join("\n");
+}
+
+function buildOverleafReadme(direction: TranslationDirection) {
+  const label = direction === "zh-en" ? "中译英" : "英译中";
+  return [
+    `Paper Acc ${label} 导出`,
+    "",
+    "1. 将整个 ZIP 上传到 Overleaf。",
+    "2. Overleaf 打开后选择 main.tex 编译。",
+    "3. 如果目标语言为中文，请使用 XeLaTeX 编译。",
+  ].join("\n");
+}
+
+function inferTranslatedTitle(
+  translatedText: string,
+  fallbackFilename: string,
+  direction: TranslationDirection,
+) {
+  const firstLine = normalizePaperText(translatedText)
+    .split("\n")
+    .map((item) => item.trim())
+    .find(Boolean);
+
+  if (firstLine) {
+    return clipText(firstLine.replace(/\[Page \d+\]/gi, "").trim(), 180);
+  }
+
+  const baseName = path.basename(fallbackFilename || "paper", path.extname(fallbackFilename || ""));
+  return direction === "zh-en"
+    ? `${baseName} translated to English`
+    : `${baseName} 中文翻译稿`;
+}
+
+function extractChatMessageText(payload: unknown) {
+  const choices = (payload as { choices?: Array<{ message?: { content?: unknown } }> } | null)?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) {
+    return "";
+  }
+
+  const content = choices[0]?.message?.content;
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item: any) => (typeof item?.text === "string" ? item.text : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return "";
+}
+
+function extractResponseOutputText(payload: unknown) {
+  const output = (payload as { output_text?: string; output?: any[] } | null)?.output_text;
+  if (typeof output === "string" && output.trim()) {
+    return output;
+  }
+
+  const items = (payload as { output?: any[] } | null)?.output;
+  if (!Array.isArray(items)) {
+    return "";
+  }
+
+  return items
+    .flatMap((item) => (Array.isArray(item?.content) ? item.content : []))
+    .map((item: any) => (typeof item?.text === "string" ? item.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  items: TInput[],
+  concurrency: number,
+  mapper: (item: TInput, index: number) => Promise<TOutput>,
+) {
+  const results = new Array<TOutput>(items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
 function ensureConfigReady() {
   const errors = getConfigErrors();
+  if (errors.length) {
+    throw new Error(errors[0]);
+  }
+}
+
+function ensureTextConfigReady() {
+  const errors = getTextConfigErrors();
   if (errors.length) {
     throw new Error(errors[0]);
   }
@@ -278,7 +818,7 @@ function getConfigErrors() {
   if (!APP_CONFIG.baseUrl) {
     errors.push("请先设置有效的 IMAGE_BASE_URL。");
   }
-  if (!APP_CONFIG.apiKey) {
+  if (!APP_CONFIG.imageApiKey) {
     errors.push("请先设置有效的 IMAGE_API_KEY。");
   }
   if (!APP_CONFIG.imageModel) {
@@ -286,6 +826,37 @@ function getConfigErrors() {
   }
 
   return errors;
+}
+
+function getTextConfigErrors() {
+  const errors: string[] = [];
+
+  if (!APP_CONFIG.baseUrl) {
+    errors.push("Missing IMAGE_BASE_URL / upstream base URL configuration.");
+  }
+  if (!APP_CONFIG.textApiKey) {
+    errors.push("Missing TEXT_API_KEY configuration.");
+  }
+  if (!APP_CONFIG.textModel) {
+    errors.push("Missing TEXT_MODEL configuration.");
+  }
+
+  return errors;
+}
+
+function normalizeIdeaChatMessages(messages: IdeaChatMessage[]) {
+  return (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.role === "user" || message?.role === "assistant")
+    .map((message) => ({
+      role: message.role,
+      content: String(message.content || "").trim(),
+    }))
+    .filter((message) => message.content)
+    .slice(-12)
+    .map((message) => ({
+      role: message.role,
+      content: message.content.slice(0, 4000),
+    }));
 }
 
 async function analyzePaper(input: {
@@ -422,6 +993,7 @@ async function requestUpstream(
     method?: string;
     headers?: Record<string, string>;
     body?: BodyInit;
+    apiKey?: string;
   },
 ) {
   const targetUrl = `${APP_CONFIG.baseUrl}${proxyPath}`;
@@ -430,7 +1002,7 @@ async function requestUpstream(
     return await fetch(targetUrl, {
       method: options.method || "POST",
       headers: {
-        Authorization: `Bearer ${APP_CONFIG.apiKey}`,
+        Authorization: `Bearer ${options.apiKey || APP_CONFIG.imageApiKey}`,
         ...(options.headers || {}),
       },
       body: options.body,
@@ -446,6 +1018,7 @@ async function requestUpstreamBuffer(
     method?: string;
     headers?: Record<string, string>;
     body?: Buffer;
+    apiKey?: string;
   },
 ) {
   const targetUrl = new URL(`${APP_CONFIG.baseUrl}${proxyPath}`);
@@ -458,7 +1031,7 @@ async function requestUpstreamBuffer(
         {
           method: options.method || "POST",
           headers: {
-            Authorization: `Bearer ${APP_CONFIG.apiKey}`,
+            Authorization: `Bearer ${options.apiKey || APP_CONFIG.imageApiKey}`,
             ...(options.headers || {}),
           },
         },
@@ -498,6 +1071,26 @@ async function requestUpstreamBuffer(
   } catch {
     throw new Error("网络异常，请检查 IMAGE_BASE_URL 是否可访问。");
   }
+}
+
+async function requestUpstreamJson(
+  proxyPath: string,
+  options: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: BodyInit;
+    apiKey?: string;
+  },
+) {
+  return parseUpstreamJsonOrThrow(
+    await requestUpstream(proxyPath, {
+      method: options.method,
+      headers: options.headers,
+      body: options.body,
+      apiKey: options.apiKey,
+    }),
+    proxyPath,
+  );
 }
 
 async function parseUpstreamJsonOrThrow(response: Response, proxyPath: string) {
@@ -1504,6 +2097,15 @@ function normalizeGenerationPayload(payload: unknown) {
 
 function sanitizeFilename(name: string) {
   return path.basename(String(name || "file")).replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_");
+}
+
+function escapeXml(text: string) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 }
 
 function createContentHash(content: Buffer) {

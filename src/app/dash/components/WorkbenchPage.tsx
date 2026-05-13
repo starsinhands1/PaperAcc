@@ -19,6 +19,10 @@ const h = {
   amberL: "#fffbea",
   coral: "#f97316",
   coralL: "#fff4ec",
+  violet: "#8b5cf6",
+  violetL: "#f3e8ff",
+  rose: "#ec4899",
+  roseL: "#fdf2f8",
   text1: "#0d1526",
   text2: "#4a5a7a",
   text3: "#8898c0",
@@ -27,16 +31,17 @@ const h = {
 const MOCK_USER = { name: "7553 用户", credits: 1200 };
 
 const MOCK_RECENT = [
-  { id: "ppt", title: "脑机接口的发展探索 PPT 提案", time: "2 小时前", icon: "📊" },
-  { id: "idea", title: "数据库优化方案灵感对话", time: "昨天", icon: "💡" },
-  { id: "paper-image", title: "多模态论文结构图", time: "3 天前", icon: "🧠" },
+  { id: "paper-ppt", title: "刚刚导出了论文演示稿", time: "2 分钟前", icon: "▤" },
+  { id: "idea", title: "新生成了一组创意灵感", time: "今天", icon: "✦" },
+  { id: "paper-translate", title: "完成了一篇论文翻译", time: "3 天前", icon: "译" },
 ];
 
 const QUICK_ENTRIES = [
-  { id: "idea", icon: "💡", color: "#14b8a6", colorL: "#e8fbf8", title: "灵感对话", desc: "多轮问答整理思路与创作方向" },
-  { id: "general-image", icon: "🖼️", color: "#10b981", colorL: "#eafaf3", title: "常规生图", desc: "完成常规文生图与图生图创作" },
-  { id: "paper-image", icon: "🧠", color: "#8b5cf6", colorL: "#f3e8ff", title: "论文生图", desc: "上传论文后生成结构图和路线图" },
-  { id: "paper-ppt", icon: "🧾", color: "#f97316", colorL: "#fff4ec", title: "论文生 PPT", desc: "自动生成组会风格 PPT 资料包" },
+  { id: "idea", icon: "✦", color: "#14b8a6", colorL: "#e8fbf8", title: "灵感对话", desc: "快速获取选题、摘要和论文创作灵感" },
+  { id: "general-image", icon: "▣", color: h.green, colorL: h.greenL, title: "常规生图", desc: "完成文生图和图生图创作" },
+  { id: "paper-image", icon: "◫", color: h.violet, colorL: h.violetL, title: "论文生图", desc: "上传论文后生成结构图和路线图" },
+  { id: "paper-ppt", icon: "▤", color: h.coral, colorL: h.coralL, title: "论文生PPT", desc: "自动整理为演示文稿与 Beamer 草稿" },
+  { id: "paper-translate", icon: "译", color: h.rose, colorL: h.roseL, title: "论文翻译", desc: "支持中译英和英译中，并导出 Word / Overleaf" },
 ];
 
 export function WorkbenchPage() {
@@ -85,7 +90,7 @@ export function WorkbenchPage() {
               你好，{MOCK_USER.name}
             </h1>
             <p style={{ fontSize: 13, color: h.text2, margin: 0 }}>
-              当前剩余 <strong style={{ color: h.amber, fontWeight: 700 }}>{MOCK_USER.credits.toLocaleString()}</strong> 灵感值
+              当前可用 <strong style={{ color: h.amber, fontWeight: 700 }}>{MOCK_USER.credits.toLocaleString()}</strong> 创作点数
             </p>
           </div>
           <button
@@ -105,7 +110,7 @@ export function WorkbenchPage() {
               whiteSpace: "nowrap",
             }}
           >
-            ＋ 新建创作
+            新建创作任务
           </button>
         </div>
 
@@ -138,15 +143,14 @@ export function WorkbenchPage() {
               marginTop: 1,
             }}
           >
-            公告
+            新功能
           </span>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: h.text1, marginBottom: 4 }}>
-              创作工具已新增科研工作台
+              论文翻译已经加入创作工具
             </div>
             <div style={{ fontSize: 12, color: h.text2, lineHeight: 1.8 }}>
-              /dash 的“创作工具”中已接入《科研》项目里的常规生图、论文生图、论文生 PPT，
-              现在可以在同一后台里继续完成科研配图与汇报产出。
+              现在可以直接在工作台进入“论文翻译”，支持中译英和英译中，并导出 `.docx` 与 Overleaf 项目压缩包。
             </div>
           </div>
         </div>
@@ -188,15 +192,15 @@ export function WorkbenchPage() {
                   transition: "box-shadow .18s, transform .18s, border-color .18s",
                   boxShadow: "0 2px 8px rgba(59,110,245,.05)",
                 }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.boxShadow = "0 8px 28px rgba(59,110,245,.12)";
-                  e.currentTarget.style.transform = "translateY(-2px)";
-                  e.currentTarget.style.borderColor = h.bh;
+                onMouseEnter={(event) => {
+                  event.currentTarget.style.boxShadow = "0 8px 28px rgba(59,110,245,.12)";
+                  event.currentTarget.style.transform = "translateY(-2px)";
+                  event.currentTarget.style.borderColor = h.bh;
                 }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.boxShadow = "0 2px 8px rgba(59,110,245,.05)";
-                  e.currentTarget.style.transform = "translateY(0)";
-                  e.currentTarget.style.borderColor = h.b;
+                onMouseLeave={(event) => {
+                  event.currentTarget.style.boxShadow = "0 2px 8px rgba(59,110,245,.05)";
+                  event.currentTarget.style.transform = "translateY(0)";
+                  event.currentTarget.style.borderColor = h.b;
                 }}
               >
                 <div
@@ -244,7 +248,7 @@ export function WorkbenchPage() {
               letterSpacing: "0.5px",
             }}
           >
-            最近记录
+            最近使用
           </div>
           <div
             style={{
@@ -265,11 +269,11 @@ export function WorkbenchPage() {
                   borderBottom: idx < MOCK_RECENT.length - 1 ? `1px solid ${h.b}` : "none",
                   cursor: "pointer",
                 }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = h.s2;
+                onMouseEnter={(event) => {
+                  event.currentTarget.style.background = h.s2;
                 }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "transparent";
+                onMouseLeave={(event) => {
+                  event.currentTarget.style.background = "transparent";
                 }}
                 onClick={() => router.push(`/dash/${item.id}`)}
               >
