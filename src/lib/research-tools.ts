@@ -2080,6 +2080,7 @@ function normalizeGenerationPayload(payload: unknown) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return {
       quality: "medium",
+      response_format: "url",
       size: "1024x1024",
     };
   }
@@ -2090,6 +2091,9 @@ function normalizeGenerationPayload(payload: unknown) {
   }
   if (!String(normalized.size || "").trim()) {
     normalized.size = "1024x1024";
+  }
+  if (!String(normalized.response_format || "").trim()) {
+    normalized.response_format = "url";
   }
   normalized.n = clampInteger(normalized.n, 1, 6, 1);
   return normalized;
