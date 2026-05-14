@@ -27,9 +27,9 @@ const FONT =
   "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Sora', system-ui, sans-serif";
 
 const CATEGORY_LABELS: Record<CreationRecord["category"], string> = {
-  "general-text-image": "常规生图 / 文生图",
-  "general-image-edit": "常规生图 / 图生图",
-  "paper-framework": "论文生图 / 总体框架图",
+  "general-text-image": "常规生图 / 文本生成",
+  "general-image-edit": "常规生图 / 图片编辑",
+  "paper-framework": "论文生图 / 框架图",
   "paper-roadmap": "论文生图 / 技术路线图",
   "paper-ppt": "论文生 PPT",
 };
@@ -37,6 +37,7 @@ const CATEGORY_LABELS: Record<CreationRecord["category"], string> = {
 export default function MinePage() {
   const [session, setSession] = useState<SessionRecord | null>(null);
   const [creations, setCreations] = useState<CreationRecord[]>([]);
+  const [expandedPromptIds, setExpandedPromptIds] = useState<string[]>([]);
 
   useEffect(() => {
     const sync = () => {
@@ -68,11 +69,19 @@ export default function MinePage() {
 
   const statsText = useMemo(() => {
     if (!session) {
-      return "登录后即可查看当前账号创作过的图片、论文图和 PPT 作品，内容会自动持久化保存。";
+      return "登录后，这里会集中展示你生成过的图片、论文图和 PPT 结果，方便回看与下载。";
     }
 
-    return `当前账号 ${maskPhone(session.phone)} 已累计创作 ${creations.length} 个作品。`;
+    return `当前账号 ${maskPhone(session.phone)} 已累计保存 ${creations.length} 个创作结果。`;
   }, [creations.length, session]);
+
+  function togglePromptExpanded(id: string) {
+    setExpandedPromptIds((current) =>
+      current.includes(id)
+        ? current.filter((item) => item !== id)
+        : [...current, id],
+    );
+  }
 
   if (!session) {
     return (
@@ -81,7 +90,8 @@ export default function MinePage() {
           <div style={emojiStyle}>作品</div>
           <h1 style={titleStyle}>我的作品</h1>
           <p style={descStyle}>
-            登录后即可查看当前账号创作过的图片、论文图和 PPT 作品，所有内容会按账号分别保存。
+            登录后，这里会自动展示你在常规生图、论文生图和论文生 PPT
+            中生成并保存的内容，方便继续查看和下载。
           </p>
         </section>
       </div>
@@ -95,15 +105,15 @@ export default function MinePage() {
           <h1 style={titleStyle}>我的作品</h1>
           <p style={{ ...descStyle, marginTop: 10 }}>{statsText}</p>
         </div>
-        <div style={badgeStyle}>当前账号作品已持久化保存</div>
+        <div style={badgeStyle}>当前登录内容已同步展示</div>
       </section>
 
       {creations.length === 0 ? (
         <section style={heroStyle}>
           <div style={emojiStyle}>空</div>
-          <h2 style={{ ...titleStyle, fontSize: 24 }}>还没有创作内容</h2>
+          <h2 style={{ ...titleStyle, fontSize: 24 }}>还没有保存的作品</h2>
           <p style={descStyle}>
-            去常规生图、论文生图或论文生 PPT 页面完成创作后，作品会自动出现在这里。
+            你在常规生图、论文生图或论文生 PPT 中生成并保存后，作品会自动出现在这里。
           </p>
         </section>
       ) : (
@@ -114,55 +124,81 @@ export default function MinePage() {
             gap: 18,
           }}
         >
-          {creations.map((creation) => (
-            <article key={creation.id} style={cardStyle}>
-              <div style={cardTopStyle}>
-                <div style={chipStyle}>{CATEGORY_LABELS[creation.category]}</div>
-                <div style={timeStyle}>{formatTime(creation.createdAt)}</div>
-              </div>
+          {creations.map((creation) => {
+            const promptText = String(creation.prompt || "");
+            const isPromptExpanded = expandedPromptIds.includes(creation.id);
+            const shouldCollapsePrompt = promptText.trim().length > 180;
 
-              <div style={cardTitleStyle}>{creation.title}</div>
-              <div style={cardDescriptionStyle}>{creation.description}</div>
-
-              {creation.prompt ? (
-                <div style={promptBoxStyle}>
-                  <div style={metaLabelStyle}>创作提示词</div>
-                  <div style={metaTextStyle}>{creation.prompt}</div>
+            return (
+              <article key={creation.id} style={cardStyle}>
+                <div style={cardTopStyle}>
+                  <div style={chipStyle}>{CATEGORY_LABELS[creation.category]}</div>
+                  <div style={timeStyle}>{formatTime(creation.createdAt)}</div>
                 </div>
-              ) : null}
 
-              {creation.coverUrl ? (
-                <div style={imageWrapStyle}>
-                  <img src={creation.coverUrl} alt={creation.title} style={coverImageStyle} />
+                <div style={cardTitleStyle}>{creation.title}</div>
+                <div style={cardDescriptionStyle}>{creation.description}</div>
+
+                {creation.prompt ? (
+                  <div style={promptBoxStyle}>
+                    <div style={promptHeaderStyle}>
+                      <div style={metaLabelStyle}>创作提示词</div>
+                      {shouldCollapsePrompt ? (
+                        <button
+                          type="button"
+                          onClick={() => togglePromptExpanded(creation.id)}
+                          style={promptToggleStyle}
+                        >
+                          {isPromptExpanded ? "收起" : "展开"}
+                        </button>
+                      ) : null}
+                    </div>
+                    <div
+                      style={{
+                        ...metaTextStyle,
+                        ...(shouldCollapsePrompt && !isPromptExpanded
+                          ? collapsedPromptTextStyle
+                          : null),
+                      }}
+                    >
+                      {creation.prompt}
+                    </div>
+                  </div>
+                ) : null}
+
+                {creation.coverUrl ? (
+                  <div style={imageWrapStyle}>
+                    <img src={creation.coverUrl} alt={creation.title} style={coverImageStyle} />
+                  </div>
+                ) : null}
+
+                <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
+                  {creation.assets.map((asset, index) =>
+                    asset.type === "image" ? (
+                      <a
+                        key={`${creation.id}-asset-${index}`}
+                        href={asset.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={assetLinkStyle}
+                      >
+                        {`查看图片 ${index + 1}`}
+                      </a>
+                    ) : (
+                      <a
+                        key={`${creation.id}-asset-${index}`}
+                        href={asset.url}
+                        download={asset.filename}
+                        style={assetLinkStyle}
+                      >
+                        {`下载文件 ${index + 1}`}
+                      </a>
+                    ),
+                  )}
                 </div>
-              ) : null}
-
-              <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
-                {creation.assets.map((asset, index) =>
-                  asset.type === "image" ? (
-                    <a
-                      key={`${creation.id}-asset-${index}`}
-                      href={asset.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      style={assetLinkStyle}
-                    >
-                      {`查看图片 ${index + 1}`}
-                    </a>
-                  ) : (
-                    <a
-                      key={`${creation.id}-asset-${index}`}
-                      href={asset.url}
-                      download={asset.filename}
-                      style={assetLinkStyle}
-                    >
-                      {`下载文件 ${index + 1}`}
-                    </a>
-                  ),
-                )}
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </section>
       )}
     </div>
@@ -308,6 +344,14 @@ const promptBoxStyle: React.CSSProperties = {
   gap: 8,
 };
 
+const promptHeaderStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  flexWrap: "wrap",
+};
+
 const metaLabelStyle: React.CSSProperties = {
   fontSize: 12,
   fontWeight: 700,
@@ -319,6 +363,25 @@ const metaTextStyle: React.CSSProperties = {
   lineHeight: 1.7,
   color: palette.text,
   wordBreak: "break-word",
+};
+
+const collapsedPromptTextStyle: React.CSSProperties = {
+  display: "-webkit-box",
+  WebkitLineClamp: 4,
+  WebkitBoxOrient: "vertical",
+  overflow: "hidden",
+};
+
+const promptToggleStyle: React.CSSProperties = {
+  border: `1px solid ${palette.border}`,
+  background: "#fff",
+  color: palette.brand,
+  borderRadius: 999,
+  padding: "5px 10px",
+  fontSize: 11,
+  fontWeight: 700,
+  cursor: "pointer",
+  lineHeight: 1.2,
 };
 
 const imageWrapStyle: React.CSSProperties = {

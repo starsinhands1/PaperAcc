@@ -130,7 +130,7 @@ export function AppSidebar() {
               fontFamily: FONT,
             }}
           >
-            论文创作与灵感工作台
+            大学生科研一站式平台
           </span>
         </div>
       </div>
@@ -244,7 +244,7 @@ export function AppSidebar() {
                 fontFamily: FONT,
               }}
             >
-              {MOCK_USER.credits} 创作积分
+              {MOCK_USER.credits} 灵感值
             </div>
           </div>
         </div>

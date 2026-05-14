@@ -865,6 +865,94 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
     );
   }
 
+  function renderSummaryRows(summary: PaperSummary | null, generatedPrompt?: string, promptFile?: PromptFile | null) {
+    if (!summary) return null;
+
+    const rows = [
+      ["论文标题", summary.title || "未识别"],
+      ["研究问题", summary.research_problem || "未识别"],
+      ["方法概述", summary.method_overview || "未识别"],
+      ["输入信息", (summary.inputs || []).join(" / ") || "未识别"],
+      ["核心模块", (summary.core_modules || []).join(" / ") || "未识别"],
+      ["技术流程", (summary.pipeline_steps || []).join(" → ") || "未识别"],
+      ["输出结果", (summary.outputs || []).join(" / ") || "未识别"],
+      ["创新点", (summary.innovations || []).join(" / ") || "未识别"],
+      ["视觉重点", summary.visual_focus || "无额外要求"],
+      ...(promptFile ? [["Prompt 文件", promptFile.path || promptFile.filename || "已生成"]] : []),
+      ...(generatedPrompt ? [["生成提示词", generatedPrompt]] : []),
+    ];
+
+    return (
+      <div style={collapsibleStackStyle}>
+        {rows.map(([title, content], index) => {
+          const normalizedContent = String(content || "");
+          return (
+            <details key={title} open={index === 0} style={collapsibleRowStyle}>
+              <summary style={collapsibleSummaryStyle}>
+                <div style={collapsibleLabelStyle}>{title}</div>
+                <div style={collapsibleContentWrapStyle}>
+                  <div style={collapsiblePreviewStyle}>
+                    {buildCollapsedPreview(normalizedContent, 110)}
+                  </div>
+                  <div style={collapsibleToggleHintStyle}>展开</div>
+                </div>
+              </summary>
+              <div style={collapsibleBodyStyle}>{normalizedContent}</div>
+            </details>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function buildPptRows(summary: PaperSummary) {
+    const rows = [
+      ["01", "封面与问题定义", summary.title || summary.research_problem || "研究主题概览"],
+      ["02", "汇报结构", "研究问题 / 方法概述 / 核心模块 / 实验流程 / 结果与创新"],
+      ["03", "研究背景", summary.research_problem || "问题定义与任务目标"],
+      ["04", "方法总览", summary.method_overview || "整体方法设计"],
+      ["05", "模块拆解", (summary.core_modules || []).slice(0, 3).join(" / ") || "核心模块说明"],
+      ["06", "实验流程", (summary.pipeline_steps || []).slice(0, 3).join(" / ") || "实验设置与流程"],
+      ["07", "结果与创新", (summary.innovations || []).slice(0, 2).join(" / ") || "结果总结"],
+    ];
+
+    return (
+      <div style={collapsibleStackStyle}>
+        {rows.map(([index, title, content], rowIndex) => {
+          const normalizedContent = String(content || "");
+          return (
+            <details key={index} open={rowIndex === 0} style={collapsibleRowStyle}>
+              <summary style={collapsibleSummaryStyle}>
+                <div style={collapsiblePptLeadStyle}>
+                  <div style={collapsibleBadgeStyle}>{index}</div>
+                  <div style={collapsibleLabelStyle}>{title}</div>
+                </div>
+                <div style={collapsibleContentWrapStyle}>
+                  <div style={collapsiblePreviewStyle}>
+                    {buildCollapsedPreview(normalizedContent, 100)}
+                  </div>
+                  <div style={collapsibleToggleHintStyle}>展开</div>
+                </div>
+              </summary>
+              <div style={collapsibleBodyStyle}>{normalizedContent}</div>
+            </details>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function buildCollapsedPreview(content: string, limit: number) {
+    const normalized = String(content || "").replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return "暂无内容";
+    }
+    if (normalized.length <= limit) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, limit - 1)).trim()}…`;
+  }
+
   return (
     <>
       <div
@@ -1082,7 +1170,7 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
                   <section style={panelStyle}>
                     <div style={cardTitleStyle}>论文理解摘要</div>
                     <p style={cardDescStyle}>系统会先提炼论文关键信息，再据此构造可追踪的图像提示词。</p>
-                    {renderSummaryCards(paperSummary, paperGeneratedPrompt, paperPromptFile)}
+                    {renderSummaryRows(paperSummary, paperGeneratedPrompt, paperPromptFile)}
                   </section>
                 )}
 
@@ -1152,7 +1240,7 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
                   <section style={panelStyle}>
                     <div style={cardTitleStyle}>论文理解摘要</div>
                     <p style={cardDescStyle}>系统会基于这份摘要自动组织 PPT 页面的内容结构，生成可继续编辑的初稿。</p>
-                    {renderSummaryCards(pptSummary)}
+                    {renderSummaryRows(pptSummary)}
                   </section>
                 )}
 
@@ -1160,7 +1248,7 @@ export function ResearchConsole({ initialSection }: { initialSection: Section })
                   <section style={panelStyle}>
                     <div style={cardTitleStyle}>默认汇报结构预览</div>
                     <p style={cardDescStyle}>更接近组会汇报节奏，先讲问题，再展开方法、实验和结果。</p>
-                    {buildPptCards(pptSummary)}
+                    {buildPptRows(pptSummary)}
                   </section>
                 )}
 
@@ -1556,4 +1644,93 @@ const downloadChoiceStyle: React.CSSProperties = {
   padding: "14px 16px",
   cursor: "pointer",
   textAlign: "left",
+};
+
+const collapsibleStackStyle: React.CSSProperties = {
+  display: "grid",
+  gap: 12,
+};
+
+const collapsibleRowStyle: React.CSSProperties = {
+  borderRadius: 18,
+  border: `1px solid ${palette.border}`,
+  background: "#f8fbff",
+  overflow: "hidden",
+};
+
+const collapsibleSummaryStyle: React.CSSProperties = {
+  listStyle: "none",
+  cursor: "pointer",
+  display: "grid",
+  gridTemplateColumns: "minmax(140px, 210px) minmax(0, 1fr)",
+  gap: 16,
+  alignItems: "center",
+  padding: "15px 18px",
+};
+
+const collapsibleLabelStyle: React.CSSProperties = {
+  fontSize: 14,
+  fontWeight: 700,
+  color: palette.text,
+  lineHeight: 1.5,
+};
+
+const collapsiblePptLeadStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: 12,
+  minWidth: 0,
+};
+
+const collapsibleBadgeStyle: React.CSSProperties = {
+  width: 34,
+  height: 34,
+  borderRadius: 12,
+  background: "linear-gradient(135deg, #eaf2ff, #ffffff)",
+  border: `1px solid ${palette.border}`,
+  color: "#4f6db8",
+  fontSize: 12,
+  fontWeight: 800,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  flexShrink: 0,
+};
+
+const collapsibleContentWrapStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 14,
+  minWidth: 0,
+};
+
+const collapsiblePreviewStyle: React.CSSProperties = {
+  minWidth: 0,
+  fontSize: 13,
+  color: "#475569",
+  lineHeight: 1.75,
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const collapsibleToggleHintStyle: React.CSSProperties = {
+  flexShrink: 0,
+  borderRadius: 999,
+  background: "#ffffff",
+  border: `1px solid ${palette.border}`,
+  color: palette.brand,
+  fontSize: 12,
+  fontWeight: 700,
+  padding: "6px 10px",
+};
+
+const collapsibleBodyStyle: React.CSSProperties = {
+  padding: "0 18px 16px 18px",
+  fontSize: 13,
+  color: "#334155",
+  lineHeight: 1.8,
+  whiteSpace: "pre-wrap",
+  wordBreak: "break-word",
 };

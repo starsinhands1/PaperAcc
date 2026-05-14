@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type ChatRole = "user" | "assistant";
 
@@ -10,13 +12,18 @@ type ChatMessage = {
   content: string;
 };
 
-const CHAT_STORAGE_KEY = "paperacc.idea.chat.history.v1";
+type ChatSession = {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  updatedAt: number;
+};
+
+const CHAT_SESSIONS_KEY = "paperacc.idea.chat.sessions.v2";
+const ACTIVE_SESSION_KEY = "paperacc.idea.chat.active.v2";
 
 const palette = {
   bg: "#eef4ff",
-  shell: "#f7faff",
-  surface: "#ffffff",
-  panel: "#edf4ff",
   line: "#dce7f7",
   lineSoft: "#e7eefb",
   text: "#111827",
@@ -30,6 +37,7 @@ const palette = {
   chip: "#f3f7ff",
   chipHover: "#e6efff",
   success: "#10a37f",
+  warning: "#f59e0b",
 };
 
 const starterPrompts = [
@@ -39,12 +47,8 @@ const starterPrompts = [
   "把我的零散想法整理成一段可以直接发给导师的方案说明",
 ];
 
-const welcomeMessage: ChatMessage = {
-  id: "welcome",
-  role: "assistant",
-  content:
-    "你好，我是灵感对话助手。你可以把论文想法、产品点子、写作方向、命名需求或零散思路直接丢给我，我会陪你连续对话、拆解和推进。",
-};
+const WELCOME_TEXT =
+  "你好，我是灵感对话助手。你可以把论文想法、产品点子、命名需求、写作方向、商业方案或零散思路直接发给我，我会像 GPT / DeepSeek 一样陪你持续对话、发散、收敛和整理。";
 
 function createMessage(role: ChatRole, content: string): ChatMessage {
   return {
@@ -54,14 +58,112 @@ function createMessage(role: ChatRole, content: string): ChatMessage {
   };
 }
 
+function createWelcomeMessage(): ChatMessage {
+  return {
+    id: `welcome-${Date.now()}`,
+    role: "assistant",
+    content: WELCOME_TEXT,
+  };
+}
+
+function createSession(title = "新对话"): ChatSession {
+  return {
+    id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title,
+    messages: [createWelcomeMessage()],
+    updatedAt: Date.now(),
+  };
+}
+
+function normalizeMessages(messages: unknown): ChatMessage[] {
+  if (!Array.isArray(messages)) {
+    return [createWelcomeMessage()];
+  }
+
+  const normalized = messages
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const message = item as { id?: unknown; role?: unknown; content?: unknown };
+      return {
+        id: String(message.id || `message-${Math.random().toString(36).slice(2, 8)}`),
+        role: message.role === "user" ? "user" : "assistant",
+        content: String(message.content || "").trim(),
+      } satisfies ChatMessage;
+    })
+    .filter((item) => item.content);
+
+  return normalized.length ? normalized : [createWelcomeMessage()];
+}
+
+function normalizeSessions(raw: unknown): ChatSession[] {
+  if (!Array.isArray(raw)) {
+    return [createSession()];
+  }
+
+  const sessions = raw
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const session = item as {
+        id?: unknown;
+        title?: unknown;
+        messages?: unknown;
+        updatedAt?: unknown;
+      };
+
+      return {
+        id: String(session.id || `session-${Math.random().toString(36).slice(2, 8)}`),
+        title: String(session.title || "新对话").trim() || "新对话",
+        messages: normalizeMessages(session.messages),
+        updatedAt:
+          typeof session.updatedAt === "number" && Number.isFinite(session.updatedAt)
+            ? session.updatedAt
+            : Date.now(),
+      } satisfies ChatSession;
+    });
+
+  return sessions.length ? sessions : [createSession()];
+}
+
+function inferSessionTitle(messages: ChatMessage[], fallbackTitle: string) {
+  const firstUserMessage = messages.find((message) => message.role === "user")?.content?.trim();
+  if (!firstUserMessage) {
+    return fallbackTitle;
+  }
+
+  const singleLine = firstUserMessage.replace(/\s+/g, " ").trim();
+  if (!singleLine) {
+    return fallbackTitle;
+  }
+
+  return singleLine.length > 20 ? `${singleLine.slice(0, 20).trim()}…` : singleLine;
+}
+
+function buildMarkdownParagraph(children: React.ReactNode, extra?: React.CSSProperties) {
+  return (
+    <p style={{ margin: "0 0 12px", whiteSpace: "pre-wrap", ...extra }}>
+      {children}
+    </p>
+  );
+}
+
 export function IdeaChatConsole() {
-  const [messages, setMessages] = useState<ChatMessage[]>([welcomeMessage]);
+  const [sessions, setSessions] = useState<ChatSession[]>(() => [createSession()]);
+  const [activeSessionId, setActiveSessionId] = useState<string>("");
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("可以直接开始提问，也可以先点下方示例。");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const hydratedRef = useRef(false);
+
+  const activeSession =
+    useMemo(
+      () => sessions.find((session) => session.id === activeSessionId) || sessions[0] || null,
+      [sessions, activeSessionId],
+    );
+
+  const activeMessages = activeSession?.messages || [];
+  const hasUserMessages = activeMessages.some((message) => message.role === "user");
 
   useEffect(() => {
     if (typeof window === "undefined" || hydratedRef.current) {
@@ -71,43 +173,41 @@ export function IdeaChatConsole() {
     hydratedRef.current = true;
 
     try {
-      const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
-      if (!raw) {
-        return;
-      }
+      const rawSessions = window.localStorage.getItem(CHAT_SESSIONS_KEY);
+      const nextSessions = normalizeSessions(rawSessions ? JSON.parse(rawSessions) : null);
+      const savedActiveId = String(window.localStorage.getItem(ACTIVE_SESSION_KEY) || "");
+      const resolvedActiveId =
+        nextSessions.find((session) => session.id === savedActiveId)?.id || nextSessions[0]?.id || "";
 
-      const saved = JSON.parse(raw) as ChatMessage[];
-      if (!Array.isArray(saved) || !saved.length) {
-        return;
-      }
-
-      const normalized = saved
-        .filter((item) => item && (item.role === "user" || item.role === "assistant"))
-        .map((item) => ({
-          id: String(item.id || `${item.role}-${Math.random().toString(36).slice(2, 8)}`),
-          role: item.role,
-          content: String(item.content || "").trim(),
-        }))
-        .filter((item) => item.content);
-
-      if (normalized.length) {
-        setMessages(normalized);
-      }
+      setSessions(nextSessions);
+      setActiveSessionId(resolvedActiveId);
     } catch {
-      window.localStorage.removeItem(CHAT_STORAGE_KEY);
+      const fallbackSession = createSession();
+      setSessions([fallbackSession]);
+      setActiveSessionId(fallbackSession.id);
+      window.localStorage.removeItem(CHAT_SESSIONS_KEY);
+      window.localStorage.removeItem(ACTIVE_SESSION_KEY);
     }
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (!activeSessionId && sessions[0]?.id) {
+      setActiveSessionId(sessions[0].id);
+    }
+  }, [sessions, activeSessionId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !activeSessionId) {
       return;
     }
-    window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages));
-  }, [messages]);
+
+    window.localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(sessions));
+    window.localStorage.setItem(ACTIVE_SESSION_KEY, activeSessionId);
+  }, [sessions, activeSessionId]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, loading]);
+  }, [activeMessages, loading]);
 
   useEffect(() => {
     syncTextareaHeight();
@@ -122,17 +222,75 @@ export function IdeaChatConsole() {
     element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
   }
 
+  function updateActiveSession(
+    updater: (session: ChatSession) => ChatSession,
+    nextStatus?: string,
+  ) {
+    if (!activeSession) {
+      return;
+    }
+
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === activeSession.id ? updater(session) : session,
+      ),
+    );
+
+    if (nextStatus) {
+      setStatus(nextStatus);
+    }
+  }
+
+  function createNewConversation() {
+    const nextSession = createSession(`新对话 ${sessions.length + 1}`);
+    setSessions((current) => [nextSession, ...current]);
+    setActiveSessionId(nextSession.id);
+    setInput("");
+    setLoading(false);
+    setStatus("已新建一个对话窗口，可以开始新的主题。");
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  function clearConversation() {
+    if (!activeSession) {
+      return;
+    }
+
+    updateActiveSession(
+      (session) => ({
+        ...session,
+        title: session.title.startsWith("新对话") ? session.title : "新对话",
+        messages: [createWelcomeMessage()],
+        updatedAt: Date.now(),
+      }),
+      "当前对话已清空，可以重新开始。",
+    );
+    setInput("");
+    setLoading(false);
+  }
+
   async function sendMessage(seedText?: string) {
+    if (!activeSession || loading) {
+      return;
+    }
+
     const rawText = typeof seedText === "string" ? seedText : input;
     const content = rawText.trim();
-    if (!content || loading) {
+    if (!content) {
       return;
     }
 
     const nextUserMessage = createMessage("user", content);
-    const nextMessages = [...messages, nextUserMessage];
+    const nextMessages = [...activeSession.messages, nextUserMessage];
+    const nextTitle = inferSessionTitle(nextMessages, activeSession.title);
 
-    setMessages(nextMessages);
+    updateActiveSession((session) => ({
+      ...session,
+      title: nextTitle,
+      messages: nextMessages,
+      updatedAt: Date.now(),
+    }));
+
     setInput("");
     setLoading(true);
     setStatus("正在整理你的问题并生成回答...");
@@ -161,35 +319,36 @@ export function IdeaChatConsole() {
         throw new Error("模型没有返回有效内容。");
       }
 
-      setMessages((current) => [...current, createMessage("assistant", reply)]);
-      setStatus(`回答已生成，当前模型：${payload?.model || "gpt-4.1"}`);
+      updateActiveSession(
+        (session) => ({
+          ...session,
+          messages: [...session.messages, createMessage("assistant", reply)],
+          updatedAt: Date.now(),
+        }),
+        `回答已生成，当前模型：${payload?.model || "gpt-4.1"}`,
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "灵感对话生成失败，请稍后重试。";
-      setMessages((current) => [
-        ...current,
-        createMessage(
-          "assistant",
-          `这次回复没有成功生成。\n\n原因：${message}\n\n你可以直接重试，或者把问题再具体一点，我继续帮你拆。`,
-        ),
-      ]);
-      setStatus(message);
+
+      updateActiveSession(
+        (session) => ({
+          ...session,
+          messages: [
+            ...session.messages,
+            createMessage(
+              "assistant",
+              `这次回复没有成功生成。\n\n原因：${message}\n\n你可以直接重试，或者把问题再具体一点，我继续帮你拆。`,
+            ),
+          ],
+          updatedAt: Date.now(),
+        }),
+        message,
+      );
     } finally {
       setLoading(false);
     }
   }
-
-  function clearConversation() {
-    setMessages([welcomeMessage]);
-    setInput("");
-    setLoading(false);
-    setStatus("对话已清空，可以重新开始。");
-    if (typeof window !== "undefined") {
-      window.localStorage.removeItem(CHAT_STORAGE_KEY);
-    }
-  }
-
-  const hasUserMessages = messages.some((message) => message.role === "user");
 
   return (
     <>
@@ -200,14 +359,41 @@ export function IdeaChatConsole() {
           100% { opacity: .28; transform: translateY(0); }
         }
 
+        .idea-markdown > *:last-child {
+          margin-bottom: 0 !important;
+        }
+
+        .idea-markdown pre code {
+          background: transparent !important;
+          padding: 0 !important;
+        }
+
+        .idea-markdown table {
+          width: 100%;
+          border-collapse: collapse;
+          margin-bottom: 12px;
+        }
+
+        .idea-markdown th,
+        .idea-markdown td {
+          border: 1px solid #dce7f7;
+          padding: 8px 10px;
+          text-align: left;
+        }
+
+        .idea-markdown th {
+          background: #f5f8ff;
+          font-weight: 700;
+        }
+
         @media (max-width: 820px) {
           .idea-shell {
             padding: 16px !important;
-            min-height: 100vh !important;
+            height: 100vh !important;
           }
 
           .idea-card {
-            min-height: calc(100vh - 32px) !important;
+            height: calc(100vh - 32px) !important;
             border-radius: 24px !important;
           }
 
@@ -217,6 +403,14 @@ export function IdeaChatConsole() {
 
           .idea-title {
             font-size: 22px !important;
+          }
+
+          .idea-session-row {
+            padding: 0 18px 12px !important;
+          }
+
+          .idea-tab-strip {
+            gap: 6px !important;
           }
 
           .idea-messages {
@@ -230,17 +424,27 @@ export function IdeaChatConsole() {
           .idea-suggestions {
             grid-template-columns: 1fr !important;
           }
+
+          .idea-header-actions {
+            width: 100%;
+            justify-content: flex-start !important;
+            overflow-x: auto;
+            flex-wrap: nowrap !important;
+            padding-bottom: 2px;
+          }
         }
       `}</style>
 
       <div
         className="idea-shell"
         style={{
-          minHeight: "100vh",
+          height: "100vh",
           background:
             "radial-gradient(circle at top left, rgba(37,99,235,0.12), transparent 28%), linear-gradient(180deg, #eef4ff 0%, #f8fbff 42%, #f4f7ff 100%)",
           padding: 24,
           fontFamily: "'Sora', 'Noto Sans SC', system-ui, sans-serif",
+          boxSizing: "border-box",
+          overflow: "hidden",
         }}
       >
         <div
@@ -248,15 +452,16 @@ export function IdeaChatConsole() {
           style={{
             maxWidth: 1120,
             margin: "0 auto",
-            minHeight: "calc(100vh - 48px)",
+            height: "calc(100vh - 48px)",
             display: "grid",
-            gridTemplateRows: "auto 1fr auto",
+            gridTemplateRows: "auto auto 1fr auto",
             background: "rgba(255,255,255,0.78)",
             backdropFilter: "blur(14px)",
             border: `1px solid ${palette.line}`,
             borderRadius: 30,
             boxShadow: "0 24px 80px rgba(37, 99, 235, 0.08)",
             overflow: "hidden",
+            minHeight: 0,
           }}
         >
           <header
@@ -293,23 +498,58 @@ export function IdeaChatConsole() {
                   maxWidth: 760,
                 }}
               >
-                这里就是一个完整的对话工作台。你可以像用 GPT 或 DeepSeek 一样连续聊天，我会围绕论文选题、创意发散、产品策划、命名文案和方案结构持续跟进。
+                这里就是一个完整的对话工作台。你可以像用 GPT 或 DeepSeek 一样连续聊天，
+                现在也支持新建多个对话窗口，分别讨论不同主题。
               </p>
             </div>
 
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <div
+              className="idea-header-actions"
+              style={{
+                display: "flex",
+                gap: 8,
+                flexWrap: "nowrap",
+                justifyContent: "flex-end",
+                alignItems: "center",
+                flexShrink: 0,
+                minWidth: 0,
+              }}
+            >
               <div
                 style={{
                   borderRadius: 999,
-                  padding: "8px 12px",
+                  padding: "6px 10px",
                   background: palette.brandSoft,
                   color: palette.brand,
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: 700,
+                  lineHeight: 1,
+                  whiteSpace: "nowrap",
+                  flexShrink: 0,
                 }}
               >
-                连续上下文对话
+                多窗口上下文对话
               </div>
+              <button
+                type="button"
+                onClick={createNewConversation}
+                style={{
+                  border: "none",
+                  background: `linear-gradient(135deg, ${palette.brand}, ${palette.success})`,
+                  color: "#fff",
+                  borderRadius: 999,
+                  padding: "6px 11px",
+                  minHeight: 28,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  lineHeight: 1,
+                  flexShrink: 0,
+                }}
+              >
+                新建对话
+              </button>
               <button
                 type="button"
                 onClick={clearConversation}
@@ -318,16 +558,108 @@ export function IdeaChatConsole() {
                   background: "#fff",
                   color: palette.text,
                   borderRadius: 999,
-                  padding: "8px 14px",
-                  fontSize: 12,
+                  padding: "6px 11px",
+                  minHeight: 28,
+                  fontSize: 11,
                   fontWeight: 700,
                   cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  lineHeight: 1,
+                  flexShrink: 0,
                 }}
               >
-                清空对话
+                清空当前
               </button>
             </div>
           </header>
+
+          <div
+            className="idea-session-row"
+            style={{
+              padding: "0 28px 0",
+              borderBottom: `1px solid ${palette.lineSoft}`,
+              background:
+                "linear-gradient(180deg, rgba(248,251,255,0.86), rgba(255,255,255,0.72))",
+            }}
+          >
+            <div
+              className="idea-tab-strip"
+              style={{
+                display: "flex",
+                gap: 8,
+                overflowX: "auto",
+                paddingTop: 14,
+                paddingBottom: 0,
+                alignItems: "flex-end",
+              }}
+            >
+              {sessions.map((session) => {
+                const active = session.id === activeSession?.id;
+                return (
+                  <button
+                    key={session.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveSessionId(session.id);
+                      setStatus(`已切换到：${session.title}`);
+                    }}
+                    style={{
+                      minWidth: 176,
+                      maxWidth: 260,
+                      textAlign: "left",
+                      borderRadius: "16px 16px 0 0",
+                      border: active
+                        ? `1px solid ${palette.line}`
+                        : `1px solid rgba(220,231,247,.95)`,
+                      background: active
+                        ? "linear-gradient(180deg, #ffffff 0%, #fbfdff 100%)"
+                        : "linear-gradient(180deg, #f7faff 0%, #eef4ff 100%)",
+                      padding: "11px 14px 10px",
+                      cursor: "pointer",
+                      flexShrink: 0,
+                      borderBottom: active ? "1px solid #ffffff" : `1px solid ${palette.line}`,
+                      marginBottom: active ? -1 : 0,
+                      boxShadow: active
+                        ? "0 -1px 0 rgba(255,255,255,.9), 0 10px 24px rgba(37,99,235,.08)"
+                        : "0 4px 12px rgba(15,23,42,.04)",
+                      position: "relative",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <span
+                        style={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: "50%",
+                          background: active
+                            ? "linear-gradient(135deg, #60a5fa, #10a37f)"
+                            : "linear-gradient(135deg, #cbd5e1, #94a3b8)",
+                          flexShrink: 0,
+                          boxShadow: active ? "0 0 0 3px rgba(59,110,245,.12)" : "none",
+                        }}
+                      />
+                      <div
+                        style={{
+                          minWidth: 0,
+                          fontSize: 13,
+                          fontWeight: 800,
+                          color: active ? palette.text : "#334155",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {session.title}
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 4, fontSize: 11, color: active ? "#64748b" : palette.textSoft }}>
+                      {Math.max(session.messages.length - 1, 0)} 条消息
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           <section
             className="idea-messages"
@@ -337,6 +669,7 @@ export function IdeaChatConsole() {
               display: "grid",
               alignContent: "start",
               gap: 18,
+              minHeight: 0,
               background:
                 "linear-gradient(180deg, rgba(245,248,255,0.35), rgba(255,255,255,0.52))",
             }}
@@ -403,7 +736,7 @@ export function IdeaChatConsole() {
               </div>
             )}
 
-            {messages.map((message) => {
+            {activeMessages.map((message) => {
               const isUser = message.role === "user";
 
               return (
@@ -439,14 +772,97 @@ export function IdeaChatConsole() {
                       {isUser ? "你" : "灵感助手"}
                     </div>
                     <div
+                      className={isUser ? undefined : "idea-markdown"}
                       style={{
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-word",
                         fontSize: 14,
                         lineHeight: 1.9,
+                        wordBreak: "break-word",
                       }}
                     >
-                      {message.content}
+                      {isUser ? (
+                        <span style={{ whiteSpace: "pre-wrap" }}>{message.content}</span>
+                      ) : (
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            p: ({ children }) => buildMarkdownParagraph(children),
+                            strong: ({ children }) => (
+                              <strong style={{ fontWeight: 800, color: palette.text }}>{children}</strong>
+                            ),
+                            ul: ({ children }) => (
+                              <ul style={{ margin: "0 0 12px", paddingLeft: 20 }}>{children}</ul>
+                            ),
+                            ol: ({ children }) => (
+                              <ol style={{ margin: "0 0 12px", paddingLeft: 20 }}>{children}</ol>
+                            ),
+                            li: ({ children }) => (
+                              <li style={{ marginBottom: 6, whiteSpace: "pre-wrap" }}>{children}</li>
+                            ),
+                            h1: ({ children }) => (
+                              <h1 style={{ margin: "0 0 12px", fontSize: 20, lineHeight: 1.5 }}>{children}</h1>
+                            ),
+                            h2: ({ children }) => (
+                              <h2 style={{ margin: "0 0 12px", fontSize: 18, lineHeight: 1.55 }}>{children}</h2>
+                            ),
+                            h3: ({ children }) => (
+                              <h3 style={{ margin: "0 0 10px", fontSize: 16, lineHeight: 1.6 }}>{children}</h3>
+                            ),
+                            a: ({ href, children }) => (
+                              <a
+                                href={href}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ color: palette.brand, textDecoration: "underline" }}
+                              >
+                                {children}
+                              </a>
+                            ),
+                            code: ({ children }) => (
+                              <code
+                                style={{
+                                  background: "#eef3ff",
+                                  borderRadius: 8,
+                                  padding: "2px 6px",
+                                  fontSize: 13,
+                                  fontFamily: "ui-monospace, SFMono-Regular, Consolas, monospace",
+                                }}
+                              >
+                                {children}
+                              </code>
+                            ),
+                            pre: ({ children }) => (
+                              <pre
+                                style={{
+                                  margin: "0 0 12px",
+                                  padding: 14,
+                                  borderRadius: 14,
+                                  background: "#f6f8fc",
+                                  overflowX: "auto",
+                                  border: `1px solid ${palette.assistantBorder}`,
+                                  fontSize: 13,
+                                  lineHeight: 1.7,
+                                }}
+                              >
+                                {children}
+                              </pre>
+                            ),
+                            blockquote: ({ children }) => (
+                              <blockquote
+                                style={{
+                                  margin: "0 0 12px",
+                                  padding: "2px 0 2px 14px",
+                                  borderLeft: `3px solid ${palette.brand}`,
+                                  color: "#475569",
+                                }}
+                              >
+                                {children}
+                              </blockquote>
+                            ),
+                          }}
+                        >
+                          {message.content}
+                        </ReactMarkdown>
+                      )}
                     </div>
                   </div>
                 </div>
